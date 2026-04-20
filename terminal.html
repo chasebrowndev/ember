@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ember</title>
+
+<!-- xterm.js from cdnjs — no build step required -->
+<link  rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addon-fit/addon-fit.min.js"></script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg0:       #0e0b0a;
+  --bg1:       #161210;
+  --border:    #3a2418;
+  --accent:    #e8681a;
+  --fg2:       #6a5040;
+  --font-mono: 'JetBrains Mono','Fira Code','Cascadia Code','Courier New',monospace;
+  --font-ui:   'IBM Plex Sans','Inter',system-ui,sans-serif;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg0);
+  color: #d8c8bc;
+  font-family: var(--font-ui);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  display: grid;
+  grid-template-rows: 34px 1fr;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* ── Titlebar ── */
+#titlebar {
+  background: var(--bg1);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  gap: 8px;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.logo {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ember-glyph { width: 13px; height: 13px; display: block; flex-shrink: 0; }
+
+.sep { flex: 1; }
+
+.cwd-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg2);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Terminal viewport ── */
+#terminal-container {
+  background: var(--bg0);
+  overflow: hidden;
+  /* xterm.js manages its own padding via the theme option below */
+  padding: 4px 6px 4px 6px;
+}
+
+/* Override xterm.js defaults so the terminal fills the container */
+.xterm { height: 100%; }
+.xterm-viewport { border-radius: 0 !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="titlebar">
+    <div class="logo">
+      <svg class="ember-glyph" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M4.5 6 Q7 2.5 9.5 6" stroke="#e8681a" stroke-width="1" stroke-linecap="round" opacity="0.55"/>
+        <ellipse cx="7" cy="9.5" rx="3.2" ry="2.2" fill="#c04c08"/>
+        <ellipse cx="6.8" cy="9.1" rx="1.4" ry="0.9" fill="#e8681a" opacity="0.75"/>
+        <ellipse cx="7" cy="9.5" rx="3.2" ry="2.2" fill="#e8681a" opacity="0.12"/>
+      </svg>
+      Ember
+    </div>
+    <div class="sep"></div>
+    <div class="cwd-label" id="cwd-label">~</div>
+  </div>
+
+  <div id="terminal-container"></div>
+</div>
+
+<script>
+'use strict';
+
+// ── xterm.js setup ───────────────────────────────────────────────────────────
+//
+// Theme maps xterm's 16-color palette to Ember's ashen colors.
+// All values can be overridden via config.ini once get_config() resolves.
+
+const THEME = {
+  background:          '#0e0b0a',
+  foreground:          '#d8c8bc',
+  cursor:              '#e8681a',
+  cursorAccent:        '#0e0b0a',
+  selectionBackground: '#3a241888',
+  // ANSI 16
+  black:               '#1e1714',
+  red:                 '#d04040',
+  green:               '#7abf6a',
+  yellow:              '#e8a030',
+  blue:                '#6a90c0',
+  magenta:             '#b87aaa',
+  cyan:                '#60a0a0',
+  white:               '#d8c8bc',
+  brightBlack:         '#6a5040',
+  brightRed:           '#e06060',
+  brightGreen:         '#9acf8a',
+  brightYellow:        '#f0b050',
+  brightBlue:          '#8ab0e0',
+  brightMagenta:       '#d09aca',
+  brightCyan:          '#80c0c0',
+  brightWhite:         '#f0e8e0',
+};
+
+const term = new Terminal({
+  theme,
+  fontFamily:     'JetBrains Mono, Fira Code, Cascadia Code, Courier New, monospace',
+  fontSize:       13,
+  lineHeight:     1.6,
+  cursorBlink:    true,
+  cursorStyle:    'block',
+  scrollback:     5000,
+  allowProposedApi: true,   // needed by FitAddon in xterm 5.x
+  macOptionIsMeta: false,
+});
+
+const fitAddon = new FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+
+// Mount into the container div
+term.open(document.getElementById('terminal-container'));
+fitAddon.fit();
+term.focus();
+
+// ── Helpers exposed to Python ─────────────────────────────────────────────────
+// Python calls window.termWrite(data) to push PTY output into xterm.js.
+window.termWrite = (data) => term.write(data);
+
+// ── Resize handling ───────────────────────────────────────────────────────────
+// ResizeObserver fires whenever the container changes size (window resize,
+// maximize, etc.).  We refit xterm.js and tell Python the new col/row count
+// so it can call TIOCSWINSZ on the PTY.
+
+const container = document.getElementById('terminal-container');
+const ro = new ResizeObserver(() => {
+  fitAddon.fit();
+  const { cols, rows } = term;
+  safeApiCall('resize', cols, rows);
+});
+ro.observe(container);
+
+// ── pywebview bridge ──────────────────────────────────────────────────────────
+// pywebview injects window.pywebview asynchronously after the page loads.
+// We wait for the `pywebviewready` event before calling any API methods.
+
+let apiReady = false;
+
+function safeApiCall(method, ...args) {
+  if (!apiReady) return;
+  try { window.pywebview.api[method](...args); }
+  catch (e) { console.warn('API call failed:', method, e); }
+}
+
+window.addEventListener('pywebviewready', () => {
+  apiReady = true;
+
+  // Apply user config (font, scrollback, etc.) before starting the shell
+  window.pywebview.api.get_config().then(cfg => {
+    if (cfg?.display?.font_size)   term.options.fontSize   = parseInt(cfg.display.font_size);
+    if (cfg?.display?.line_height) term.options.lineHeight = parseFloat(cfg.display.line_height);
+    if (cfg?.display?.font_family) term.options.fontFamily = cfg.display.font_family;
+    if (cfg?.behavior?.scrollback) term.options.scrollback = parseInt(cfg.behavior.scrollback);
+
+    // Apply any theme overrides from config
+    if (cfg?.theme) {
+      const t = cfg.theme;
+      const overrides = {};
+      if (t.bg)        overrides.background = t.bg;
+      if (t.fg)        overrides.foreground = t.fg;
+      if (t.cursor)    overrides.cursor     = t.cursor;
+      if (t.accent)    overrides.cursor     = t.accent;
+      if (t.selection) overrides.selectionBackground = t.selection;
+      if (Object.keys(overrides).length) term.options.theme = { ...THEME, ...overrides };
+    }
+
+    fitAddon.fit();
+    const { cols, rows } = term;
+
+    // start_shell() forks the shell and begins piping PTY output to termWrite()
+    window.pywebview.api.start_shell(cols, rows);
+  });
+});
+
+// ── Input: xterm.js → Python → PTY ───────────────────────────────────────────
+// onData fires for every keystroke, paste, or special key sequence.
+// We pass the raw string directly to Python which writes it to the PTY fd.
+term.onData(data => safeApiCall('write', data));
+
+// ── OSC 7 CWD tracking ────────────────────────────────────────────────────────
+// If the shell emits OSC 7 (file://hostname/path), update the titlebar cwd.
+// Add to your shell rc: printf '\e]7;file://%s%s\e\\' "$HOSTNAME" "$PWD"
+term.parser.registerOscHandler(7, (data) => {
+  try {
+    const url  = new URL(data);
+    const path = decodeURIComponent(url.pathname);
+    const home = '';   // we don't know $HOME here; just show the raw path
+    document.getElementById('cwd-label').textContent = path;
+  } catch (_) {}
+  return false;  // let xterm.js also process it
+});
+</script>
+</body>
+</html>

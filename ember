@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""
+Ember — terminal emulator built on pywebview + xterm.js
+"""
+import sys
+import os
+import pty
+import fcntl
+import termios
+import struct
+import threading
+import signal
+import configparser
+import webview
+
+# ── Wayland / X11 backend detection ─────────────────────────────────────────
+_wayland = bool(os.environ.get('WAYLAND_DISPLAY'))
+_x11     = bool(os.environ.get('DISPLAY'))
+
+if _wayland and not os.environ.get('GDK_BACKEND'):
+    os.environ.pop('GDK_BACKEND', None)
+    os.environ['WEBKIT_FORCE_SANDBOX']        = '0'
+    os.environ['WEBKIT_DISABLE_DMABUF_RENDERER'] = '1'
+elif _x11 and not _wayland:
+    os.environ['GDK_BACKEND']                 = 'x11'
+    os.environ['WEBKIT_DISABLE_COMPOSITING_MODE'] = '1'
+else:
+    os.environ.pop('GDK_BACKEND', None)
+    os.environ['WEBKIT_FORCE_SANDBOX'] = '0'
+
+
+# ── PTY manager ──────────────────────────────────────────────────────────────
+class PtyBridge:
+    """
+    Owns the child shell process and its PTY.
+
+    Lifecycle:
+      1. start()  — forks the shell, begins the reader thread
+      2. write()  — sends keystrokes / paste data into the PTY master
+      3. resize() — updates the kernel's terminal window size record
+      4. stop()   — tears everything down cleanly
+
+    Output flow:
+      reader thread reads raw bytes from the PTY master fd →
+      chunks them (up to READ_SIZE bytes per iteration) →
+      calls self._on_data(chunk) which is set by the API layer →
+      API layer calls window.evaluate_js() to push to xterm.js
+    """
+
+    READ_SIZE = 4096
+
+    def __init__(self, shell=None, cwd=None):
+        self.shell    = shell or os.environ.get('SHELL', '/bin/bash')
+        self.cwd      = cwd   or os.path.expanduser('~')
+        self.master   = None   # PTY master fd
+        self.pid      = None   # child PID
+        self._thread  = None
+        self._running = False
+        self._on_data = lambda data: None  # set externally
+
+    def start(self):
+        # pty.fork() returns (pid, master_fd) in the parent,
+        # and (0, 0) in the child (the child never returns from execvp).
+        self.pid, self.master = pty.fork()
+
+        if self.pid == 0:
+            # ── child ────────────────────────────────────────────────────────
+            # We are now the shell process.  Set TERM so ncurses apps work,
+            # change to the desired cwd, then exec the shell.
+            os.environ['TERM']     = 'xterm-256color'
+            os.environ['COLORTERM'] = 'truecolor'
+            try:
+                os.chdir(self.cwd)
+            except OSError:
+                pass
+            os.execvp(self.shell, [self.shell])
+            sys.exit(1)   # only reached if execvp fails
+
+        # ── parent ───────────────────────────────────────────────────────────
+        self._running = True
+        self._thread  = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
+
+    def _reader(self):
+        """Background thread: drain PTY master → call _on_data with chunks."""
+        import select
+        while self._running:
+            try:
+                r, _, _ = select.select([self.master], [], [], 0.05)
+                if r:
+                    data = os.read(self.master, self.READ_SIZE)
+                    if not data:
+                        break
+                    # Decode leniently — terminals can emit partial UTF-8
+                    self._on_data(data.decode('utf-8', errors='replace'))
+            except OSError:
+                # PTY closed (shell exited)
+                break
+        self._running = False
+
+    def write(self, data: str):
+        """Send keystrokes into the PTY master (called from JS API)."""
+        if self.master is not None:
+            try:
+                os.write(self.master, data.encode('utf-8'))
+            except OSError:
+                pass
+
+    def resize(self, cols: int, rows: int):
+        """
+        Tell the kernel the new terminal dimensions.
+        TIOCSWINSZ packs: rows, cols, xpixel, ypixel (pixels unused → 0).
+        This lets shell programs like vim/htop reflow their output correctly.
+        """
+        if self.master is not None:
+            try:
+                winsize = struct.pack('HHHH', rows, cols, 0, 0)
+                fcntl.ioctl(self.master, termios.TIOCSWINSZ, winsize)
+                # Also deliver SIGWINCH to the child's process group so
+                # running programs (vim, less, etc.) get the resize signal.
+                os.killpg(os.getpgid(self.pid), signal.SIGWINCH)
+            except OSError:
+                pass
+
+    def stop(self):
+        self._running = False
+        if self.pid:
+            try:
+                os.killpg(os.getpgid(self.pid), signal.SIGTERM)
+            except OSError:
+                pass
+
+
+# ── pywebview JS API ─────────────────────────────────────────────────────────
+class API:
+    """
+    Exposed to the frontend as `window.pywebview.api.*`.
+    All methods are called from the JS side and run on pywebview's API thread.
+    """
+
+    def __init__(self, config, pty_bridge: PtyBridge, get_window):
+        self.config     = config
+        self.pty        = pty_bridge
+        self.get_window = get_window  # callable → webview.Window
+
+    # Called once by xterm.js after it has initialised
+    def start_shell(self, cols: int, rows: int):
+        self.pty.resize(cols, rows)
+
+        # Wire PTY output → xterm.js
+        def on_data(text: str):
+            # Escape backslashes and backticks so the string is safe
+            # to embed inside a JS template literal.
+            escaped = text.replace('\\', '\\\\').replace('`', '\\`')
+            win = self.get_window()
+            if win:
+                win.evaluate_js(f'termWrite(`{escaped}`)')
+
+        self.pty._on_data = on_data
+        self.pty.start()
+
+    # Called on every keystroke / paste from xterm.js
+    def write(self, data: str):
+        self.pty.write(data)
+
+    # Called when the xterm.js viewport is resized
+    def resize(self, cols: int, rows: int):
+        self.pty.resize(cols, rows)
+
+    # Called on startup to apply user config to the frontend
+    def get_config(self):
+        return {
+            'display':  dict(self.config['display']),
+            'theme':    dict(self.config['theme']),
+            'behavior': dict(self.config['behavior']),
+        }
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+def load_config(config_path):
+    config = configparser.ConfigParser()
+    if os.path.exists(config_path):
+        config.read(config_path)
+    else:
+        config['display'] = {
+            'font_size':   '13',
+            'line_height': '1.6',
+            'font_family': 'JetBrains Mono, Fira Code, Cascadia Code, Courier New, monospace',
+        }
+        config['theme'] = {
+            'name':      'ashen',
+            'bg':        '#0e0b0a',
+            'fg':        '#d8c8bc',
+            'cursor':    '#e8681a',
+            'selection': '#3a2418',
+            'black':     '#1e1714',
+            'red':       '#d04040',
+            'green':     '#7abf6a',
+            'yellow':    '#e8a030',
+            'blue':      '#6a90c0',
+            'magenta':   '#b87aaa',
+            'cyan':      '#60a0a0',
+            'white':     '#d8c8bc',
+            'accent':    '#e8681a',
+        }
+        config['behavior'] = {
+            'scrollback':    '5000',
+            'shell':         '',
+            'bell':          'false',
+        }
+    return config
+
+
+def find_html():
+    candidates = [
+        '/usr/share/ember/terminal.html',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'terminal.html'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets', 'terminal.html'),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+def main():
+    config_dir  = os.path.expanduser('~/.config/ember')
+    config_path = os.path.join(config_dir, 'config.ini')
+    os.makedirs(config_dir, exist_ok=True)
+
+    config    = load_config(config_path)
+    html_path = find_html()
+
+    if not html_path:
+        print("Error: Could not find terminal.html", file=sys.stderr)
+        sys.exit(1)
+
+    shell = config['behavior'].get('shell', '').strip() or None
+    pty_bridge = PtyBridge(shell=shell)
+
+    # We need a reference to the window inside the API, but the window doesn't
+    # exist until after create_window().  Use a closure so the API always
+    # resolves the window lazily at call time.
+    _window_ref = [None]
+    def get_window():
+        return _window_ref[0]
+
+    api    = API(config, pty_bridge, get_window)
+    window = webview.create_window(
+        'Ember',
+        f'file://{html_path}',
+        js_api=api,
+        width=1200,
+        height=700,
+        min_size=(600, 400),
+        background_color='#0e0b0a',
+    )
+    _window_ref[0] = window
+
+    def on_closed():
+        pty_bridge.stop()
+
+    window.events.closed += on_closed
+
+    webview.start(gui='gtk')
+
+
+if __name__ == '__main__':
+    main()

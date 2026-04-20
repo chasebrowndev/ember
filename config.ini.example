@@ -1,0 +1,31 @@
+# Ember Configuration File
+# Location: ~/.config/ember/config.ini
+
+[display]
+font_size   = 13
+line_height = 1.6
+font_family = JetBrains Mono, Fira Code, Cascadia Code, Courier New, monospace
+
+[theme]
+# Ashen — deep charcoal + ember orange
+bg        = #0e0b0a
+fg        = #d8c8bc
+cursor    = #e8681a
+selection = #3a2418
+accent    = #e8681a
+black     = #1e1714
+red       = #d04040
+green     = #7abf6a
+yellow    = #e8a030
+blue      = #6a90c0
+magenta   = #b87aaa
+cyan      = #60a0a0
+white     = #d8c8bc
+
+[behavior]
+# Lines of scrollback buffer
+scrollback = 5000
+# Override default shell (leave blank to use $SHELL)
+shell      =
+# Audible bell
+bell       = false

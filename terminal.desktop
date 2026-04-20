@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Ember
+Comment=A beautiful terminal emulator
+Exec=ember
+Icon=utilities-terminal
+Categories=Utility;System;
+Terminal=false
