@@ -18,15 +18,23 @@ _wayland = bool(os.environ.get('WAYLAND_DISPLAY'))
 _x11     = bool(os.environ.get('DISPLAY'))
 
 if _wayland and not os.environ.get('GDK_BACKEND'):
+    # Native Wayland — let GTK pick its Wayland backend.
     os.environ.pop('GDK_BACKEND', None)
-    os.environ['WEBKIT_FORCE_SANDBOX']        = '0'
+    # WebKit2GTK >=2.44 renamed WEBKIT_FORCE_SANDBOX (now a no-op + warning)
+    # to WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS. Set both for broad compat.
+    os.environ['WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS'] = '1'
+    os.environ['WEBKIT_FORCE_SANDBOX']                     = '0'
+    # DMABuf renderer can crash/freeze on some Mesa+Wayland combos
     os.environ['WEBKIT_DISABLE_DMABUF_RENDERER'] = '1'
 elif _x11 and not _wayland:
-    os.environ['GDK_BACKEND']                 = 'x11'
+    # Pure X11
+    os.environ['GDK_BACKEND']                     = 'x11'
     os.environ['WEBKIT_DISABLE_COMPOSITING_MODE'] = '1'
 else:
+    # XWayland / unknown
     os.environ.pop('GDK_BACKEND', None)
-    os.environ['WEBKIT_FORCE_SANDBOX'] = '0'
+    os.environ['WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS'] = '1'
+    os.environ['WEBKIT_FORCE_SANDBOX']                     = '0'
 
 
 # ── PTY manager ──────────────────────────────────────────────────────────────
