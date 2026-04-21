@@ -1,5 +1,9 @@
 # Ember
 
+#
+# I'll be real with you this thing doesnt work yet.
+#
+
 A minimal, beautiful terminal emulator with ashen theme. Built with Python and pywebview. No bloat, just a prettier terminal.
 
 ## Features
